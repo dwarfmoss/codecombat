@@ -9,21 +9,29 @@ describe 'Local Mongo queries', ->
       'worth': 6
       'type': 'unicorn'
       'likes': ['poptarts', 'popsicles', 'popcorn']
+      nested: {
+        str:'ing'
+      }
 
     @fixture2 = this: is: so: 'deep'
 
   it 'regular match of a property', ->
     expect(LocalMongo.matchesQuery(@fixture1, 'gender': 'unicorn')).toBeFalsy()
-    expect(LocalMongo.matchesQuery(@fixture1, 'type':'unicorn')).toBeTruthy()
-    expect(LocalMongo.matchesQuery(@fixture1, 'type':'zebra')).toBeFalsy()
-    expect(LocalMongo.matchesQuery(@fixture1, 'type':'unicorn', 'id':'somestring')).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, 'type': 'unicorn')).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, 'type': 'zebra')).toBeFalsy()
+    expect(LocalMongo.matchesQuery(@fixture1, 'type': 'unicorn', 'id': 'somestring')).toBeTruthy()
 
   it 'array match of a property', ->
-    expect(LocalMongo.matchesQuery(@fixture1, 'likes':'poptarts')).toBeTruthy()
-    expect(LocalMongo.matchesQuery(@fixture1, 'likes':'walks on the beach')).toBeFalsy()
+    expect(LocalMongo.matchesQuery(@fixture1, 'likes': 'poptarts')).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, 'likes': 'walks on the beach')).toBeFalsy()
 
   it 'nested match', ->
-    expect(LocalMongo.matchesQuery(@fixture2, 'this.is.so':'deep')).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture2, 'this.is.so': 'deep')).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture2, {this:{is:{so: 'deep'}}})).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture2, {'this.is':{so: 'deep'}})).toBeTruthy()
+    mixedQuery = { nested: {str:'ing'}, worth: {$gt:3} }
+    expect(LocalMongo.matchesQuery(@fixture1, mixedQuery)).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture2, mixedQuery)).toBeFalsy()
 
   it '$gt selector', ->
     expect(LocalMongo.matchesQuery(@fixture1, 'value': '$gt': 8000)).toBeTruthy()
@@ -67,15 +75,14 @@ describe 'Local Mongo queries', ->
     expect(LocalMongo.matchesQuery(@fixture1, 'likes': '$nin': ['popcorn', 'chicken'])).toBeFalsy()
 
   it '$or operator', ->
-    expect(LocalMongo.matchesQuery(@fixture1, $or: [{value:9000}, {type:'zebra'}])).toBeTruthy()
-    expect(LocalMongo.matchesQuery(@fixture1, $or: [{value:9001}, {worth:$lt:10}])).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, $or: [{value: 9000}, {type: 'zebra'}])).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, $or: [{value: 9001}, {worth: '$lt': 10}])).toBeTruthy()
 
   it '$and operator', ->
-    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value:9000}, {type:'zebra'}])).toBeFalsy()
-    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value:9000}, {type:'unicorn'}])).toBeTruthy()
-    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value:$gte:9000}, {worth:$lt:10}])).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value: 9000}, {type: 'zebra'}])).toBeFalsy()
+    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value: 9000}, {type: 'unicorn'}])).toBeTruthy()
+    expect(LocalMongo.matchesQuery(@fixture1, $and: [{value: '$gte': 9000}, {worth: '$lt': 10}])).toBeTruthy()
 
   it '$exists operator', ->
     expect(LocalMongo.matchesQuery(@fixture1, type: $exists: true)).toBeTruthy()
     expect(LocalMongo.matchesQuery(@fixture1, interesting: $exists: false)).toBeTruthy()
-

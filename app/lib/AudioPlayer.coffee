@@ -1,13 +1,15 @@
-CocoClass = require 'lib/CocoClass'
+CocoClass = require 'core/CocoClass'
 cache = {}
-{me} = require('lib/auth')
+{me} = require 'core/auth'
+createjs = require 'lib/createjs-parts'
 
 # Top 20 obscene words (plus 'fiddlesticks') will trigger swearing Simlish with *beeps*.
 # Didn't like leaving so much profanity lying around in the source, so rot13'd.
-rot13 = (s) -> s.replace /[A-z]/g, (c) -> String.fromCharCode c.charCodeAt(0) + (if c.toUpperCase() <= "M" then 13 else -13)
-swears = (rot13 s for s in ["nefrubyr", "nffubyr", "onfgneq", "ovgpu", "oybbql", "obyybpxf", "ohttre", "pbpx", "penc", "phag", "qnza", "qnea", "qvpx", "qbhpur", "snt", "shpx", "cvff", "chffl", "fuvg", "fyhg", "svqqyrfgvpxf"])
+rot13 = (s) -> s.replace /[A-z]/g, (c) -> String.fromCharCode c.charCodeAt(0) + (if c.toUpperCase() <= 'M' then 13 else -13)
+swears = (rot13 s for s in ['nefrubyr', 'nffubyr', 'onfgneq', 'ovgpu', 'oybbql', 'obyybpxf', 'ohttre', 'pbpx', 'penc', 'phag', 'qnza', 'qnea', 'qvpx', 'qbhpur', 'snt', 'shpx', 'cvff', 'chffl', 'fuvg', 'fyhg', 'svqqyrfgvpxf'])
 
-createjs.Sound.registerPlugins([createjs.WebAudioPlugin, createjs.FlashPlugin, createjs.HTMLAudioPlugin])
+soundPlugins = [createjs.WebAudioPlugin, createjs.HTMLAudioPlugin]
+createjs.Sound.registerPlugins(soundPlugins)
 
 class Manifest
   constructor: -> @storage = {}
@@ -33,11 +35,11 @@ class Media
 
 class AudioPlayer extends CocoClass
   subscriptions:
-    'play-sound': (e) -> @playInterfaceSound e.trigger, e.volume
+    'audio-player:play-sound': (e) -> @playInterfaceSound e.trigger, e.volume
 
   constructor: () ->
     super()
-    @ext = if createjs.Sound.getCapability('mp3') then '.mp3' else '.ogg'
+    @ext = if createjs.Sound.capabilities.mp3 then '.mp3' else '.ogg'
     @camera = null
     @listenToSound()
     @createNewManifest()
@@ -56,7 +58,9 @@ class AudioPlayer extends CocoClass
     sup = @camera.worldToSurface pos
     svp = @camera.surfaceViewport
     pan = Math.max -1, Math.min 1, ((sup.x - svp.x) - svp.width / 2) / svp.width
+    pan = 0 if _.isNaN pan
     dst = @camera.distanceRatioTo pos
+    dst = 0.8 if _.isNaN dst
     vol = Math.min 1, options.volume / Math.pow (dst + 0.2), 2
     volume: options.volume, delay: options.delay, pan: pan
 
@@ -68,6 +72,16 @@ class AudioPlayer extends CocoClass
     return null unless say = soundTriggers?.say
     message = _.string.slugify message
     return sound if sound = say[message]
+    if _.string.startsWith message, 'attack'
+      return sound if sound = say.attack
+    if message.indexOf("i-dont-see-anyone") isnt -1
+      return sound if sound = say['i-dont-see-anyone']
+    if message.indexOf("i-see-you") isnt -1
+      return sound if sound = say['i-see-you']
+    if message.indexOf("repeating-loop") isnt -1
+      return sound if sound = say['repeating-loop']
+    if /move(up|down|left|right)/.test message
+      return sound if sound = say["move-#{message[4...]}"]
     defaults = say.defaultSimlish
     if say.swearingSimlish?.length and _.find(swears, (s) -> message.search(s) isnt -1)
       defaults = say.swearingSimlish
@@ -75,29 +89,39 @@ class AudioPlayer extends CocoClass
     return defaults[message.length % defaults.length]
 
   preloadInterfaceSounds: (names) ->
+    return unless me.get 'volume'
     for name in names
       filename = "/file/interface/#{name}#{@ext}"
       @preloadSound filename, name
 
   playInterfaceSound: (name, volume=1) ->
+    return unless volume and me.get 'volume'
     filename = "/file/interface/#{name}#{@ext}"
-    if filename of cache and createjs.Sound.loadComplete filename
+    if @hasLoadedSound filename
       @playSound name, volume
     else
       @preloadInterfaceSounds [name] unless filename of cache
       @soundsToPlayWhenLoaded[name] = volume
 
   playSound: (name, volume=1, delay=0, pos=null) ->
-    audioOptions = {volume: (me.get('volume') ? 1) * volume, delay: delay}
-    unless @camera is null or pos is null
-      audioOptions = @applyPanning audioOptions, pos
+    return console.error 'Trying to play empty sound?' unless name
+    return unless volume and me.get 'volume'
+    audioOptions = {volume: volume, delay: delay}
+    filename = if _.string.startsWith(name, '/file/') then name else '/file/' + name
+    unless @hasLoadedSound filename
+      @soundsToPlayWhenLoaded[name] = audioOptions.volume
+    audioOptions = @applyPanning audioOptions, pos if @camera and not @camera.destroyed and pos
     instance = createjs.Sound.play name, audioOptions
     instance
 
-#  # TODO: load Interface sounds somehow, somewhere, somewhen
+  hasLoadedSound: (filename, name) ->
+    return false unless filename of cache
+    return false unless createjs.Sound.loadComplete filename
+    true
 
   preloadSoundReference: (sound) ->
-    name = @nameForSoundReference sound
+    return unless me.get 'volume'
+    return unless name = @nameForSoundReference sound
     filename = '/file/' + name
     @preloadSound filename, name
     filename
@@ -110,7 +134,7 @@ class AudioPlayer extends CocoClass
     return if filename of cache
     name ?= filename
     # SoundJS flips out if you try to register the same file twice
-    createjs.Sound.registerSound(filename, name, 1, true)  # 1: 1 channel, true: should preload
+    result = createjs.Sound.registerSound(filename, name, 1)  # 1: 1 channel
     cache[filename] = new Media(name)
 
   # PROGRESS CALLBACKS
@@ -129,7 +153,7 @@ class AudioPlayer extends CocoClass
     console.error 'Could not load sound', e
 
   notifyProgressChanged: ->
-    Backbone.Mediator.publish('audio-player:loaded', {sender:@})
+    Backbone.Mediator.publish('audio-player:loaded', {sender: @})
 
   getStatus: (src) ->
     return cache[src] or null

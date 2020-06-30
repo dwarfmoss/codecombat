@@ -1,14 +1,16 @@
+createjs = require 'lib/createjs-parts'
+
 module.exports = class DebugDisplay extends createjs.Container
   layerPriority: 20
   subscriptions:
-    'level-set-debug': 'onSetDebug'
+    'level:set-debug': 'onSetDebug'
 
   constructor: (options) ->
     super()
     @initialize()
     @canvasWidth = options.canvasWidth
     @canvasHeight = options.canvasHeight
-    console.error "DebugDisplay needs canvasWidth/Height." unless @canvasWidth and @canvasHeight
+    console.error 'DebugDisplay needs canvasWidth/Height.' unless @canvasWidth and @canvasHeight
     @build()
     @onSetDebug debug: true
     Backbone.Mediator.subscribe(channel, @[func], @) for channel, func of @subscriptions
@@ -25,7 +27,7 @@ module.exports = class DebugDisplay extends createjs.Container
 
   build: ->
     @mouseEnabled = @mouseChildren = false
-    @addChild @frameText = new createjs.Text "...", "20px Arial", "#FFF"
+    @addChild @frameText = new createjs.Text '...', '20px Arial', '#FFF'
     @frameText.name = 'frame text'
     @frameText.x = @canvasWidth - 50
     @frameText.y = @canvasHeight - 25
@@ -41,5 +43,5 @@ module.exports = class DebugDisplay extends createjs.Container
       @lastFrameSecondStart = time
       @framesRenderedThisSecond = 0
 
-    @frameText.text = Math.round(currentFrame) + (if @fps? then " - " + @fps + ' fps' else '')
+    @frameText.text = Math.round(currentFrame) + (if @fps? then ' - ' + @fps + ' fps' else '')
     @frameText.x = @canvasWidth - @frameText.getMeasuredWidth() - 10

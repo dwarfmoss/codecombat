@@ -19,16 +19,28 @@ module.exports = class SuperModel extends Backbone.Model
 
   report: ->
     # Useful for debugging why a SuperModel never finishes loading.
-    console.info "SuperModel report ------------------------"
+    console.info 'SuperModel report ------------------------'
     console.info "#{_.values(@resources).length} resources."
     unfinished = []
     for resource in _.values(@resources) when resource
-      console.info '\t', resource.name, "loaded", resource.isLoaded
+      console.info "\t", resource.name, 'loaded', resource.isLoaded, resource.model
       unfinished.push resource unless resource.isLoaded
     unfinished
+    
+  numDuplicates: ->
+    # For debugging. TODO: Prevent duplicates from happening!
+    ids = (m.get('_id') for m in _.values(@models))
+    return _.size(ids) - _.size(_.unique(ids))
 
   loadModel: (model, name, fetchOptions, value=1) ->
-    cachedModel = @getModelByURL(model.getURL())
+    # Deprecating name. Handle if name is not included
+    value = fetchOptions if _.isNumber(fetchOptions)
+    fetchOptions = name if _.isObject(name)
+      
+    # hero-ladder levels need remote opponent_session for latest session data (e.g. code)
+    # Can't apply to everything since other features rely on cached models being more recent (E.g. level_session)
+    # E.g.#2 heroConfig isn't necessarily saved to db in world map inventory modal, so we need to load the cached session on level start
+    cachedModel = @getModelByURL(model.getURL()) unless fetchOptions?.cache is false and name is 'opponent_session'
     if cachedModel
       if cachedModel.loaded
         res = @addModelResource(cachedModel, name, fetchOptions, 0)
@@ -38,7 +50,6 @@ module.exports = class SuperModel extends Backbone.Model
         res = @addModelResource(cachedModel, name, fetchOptions, value)
         res.markLoading()
         return res
-
     else
       @registerModel(model)
       res = @addModelResource(model, name, fetchOptions, value)
@@ -46,6 +57,10 @@ module.exports = class SuperModel extends Backbone.Model
       return res
 
   loadCollection: (collection, name, fetchOptions, value=1) ->
+    # Deprecating name. Handle if name is not included
+    value = fetchOptions if _.isNumber(fetchOptions)
+    fetchOptions = name if _.isObject(name)
+    
     url = collection.getURL()
     if cachedCollection = @collections[url]
       console.debug 'Collection cache hit', url, 'already loaded', cachedCollection.loaded
@@ -57,15 +72,48 @@ module.exports = class SuperModel extends Backbone.Model
         res = @addModelResource(cachedCollection, name, fetchOptions, value)
         res.markLoading()
         return res
-
     else
       @addCollection collection
-      @listenToOnce collection, 'sync', (c) ->
-        console.debug 'Registering collection', url
-        @registerCollection c
+      onCollectionSynced = (c) ->
+        if collection.url is c.url
+          @registerCollection c
+        else
+          console.warn 'Sync triggered for collection', c
+          console.warn 'Yet got other object', c
+          @listenToOnce collection, 'sync', onCollectionSynced
+      @listenToOnce collection, 'sync', onCollectionSynced
       res = @addModelResource(collection, name, fetchOptions, value)
       res.load() if not (res.isLoading or res.isLoaded)
       return res
+      
+  # Eventually should use only these functions. Use SuperModel just to track progress.
+  trackModel: (model, value) ->
+    res = @addModelResource(model, '', {}, value)
+    res.listen()
+
+  trackCollection: (collection, value) ->
+    res = @addModelResource(collection, '', {}, value)
+    res.listen()
+  
+  trackPromise: (promise, value=1) ->
+    res = new Resource('', value)
+    promise.then ->
+      res.markLoaded()
+    promise.catch (err) ->
+      res.error = err
+      res.markFailed()
+    @storeResource(res, value)
+    return promise
+    
+  trackRequest: (jqxhr, value=1) ->
+    res = new Resource('', value)
+    res.jqxhr = jqxhr
+    jqxhr.done -> res.markLoaded()
+    jqxhr.fail -> res.markFailed()
+    @storeResource(res, value)
+    return jqxhr
+    
+  trackRequests: (jqxhrs, value=1) -> @trackRequest(jqxhr, value) for jqxhr in jqxhrs
 
   # replace or overwrite
   shouldSaveBackups: (model) -> false
@@ -81,16 +129,24 @@ module.exports = class SuperModel extends Backbone.Model
     modelURL = modelURL() if _.isFunction(modelURL)
     return @models[modelURL] or null
 
+  getModelByOriginal: (ModelClass, original, filter=null) ->
+    _.find @models, (m) ->
+      m.get('original') is original and m.constructor.className is ModelClass.className and (not filter or filter(m))
+
   getModelByOriginalAndMajorVersion: (ModelClass, original, majorVersion=0) ->
     _.find @models, (m) ->
-      m.get('original') is original and m.get('version').major is majorVersion and m.constructor.className is ModelClass.className
+      return unless v = m.get('version')
+      m.get('original') is original and v.major is majorVersion and m.constructor.className is ModelClass.className
 
   getModels: (ModelClass) ->
     # can't use instanceof. SuperModel gets passed between windows, and one window
     # will have different class objects than another window.
     # So compare className instead.
-    return (m for key, m of @models when m.constructor.className is ModelClass.className) if ModelClass
-    return _.values @models
+    if not ModelClass
+      return _.values @models
+    # Allow checking by string name to reduce module dependencies
+    className = if _.isString(ModelClass) then ModelClass else ModelClass.className
+    return (m for key, m of @models when m.constructor.className is className)
 
   registerModel: (model) ->
     @models[model.getURL()] = model
@@ -111,7 +167,9 @@ module.exports = class SuperModel extends Backbone.Model
     for model, i in collection.models
       cachedModel = @getModelByURL(model.getURL())
       if cachedModel
-        collection.models[i] = cachedModel
+        clone = $.extend true, {}, model.attributes
+        cachedModel.set(clone, {silent: true, fromMerge: true})
+        #console.debug "Updated cached model <#{cachedModel.get('name') or cachedModel.getURL()}> with new data"
       else
         @registerModel(model)
     collection
@@ -119,10 +177,14 @@ module.exports = class SuperModel extends Backbone.Model
   # Tracking resources being loaded for this supermodel
 
   finished: ->
-    return @progress is 1.0 or not @denom
+    return (@progress is 1.0) or (not @denom) or @failed
 
   addModelResource: (modelOrCollection, name, fetchOptions, value=1) ->
-    modelOrCollection.saveBackups = @shouldSaveBackups(modelOrCollection)
+    # Deprecating name. Handle if name is not included
+    value = fetchOptions if _.isNumber(fetchOptions)
+    fetchOptions = name if _.isObject(name)
+    
+    modelOrCollection.saveBackups = modelOrCollection.saveBackups or @shouldSaveBackups(modelOrCollection)
     @checkName(name)
     res = new ModelResource(modelOrCollection, name, fetchOptions, value)
     @storeResource(res, value)
@@ -132,20 +194,30 @@ module.exports = class SuperModel extends Backbone.Model
     @removeResource _.find(@resources, (resource) -> resource?.model is modelOrCollection)
 
   addRequestResource: (name, jqxhrOptions, value=1) ->
+    # Deprecating name. Handle if name is not included
+    value = jqxhrOptions if _.isNumber(jqxhrOptions)
+    jqxhrOptions = name if _.isObject(name)
+    
     @checkName(name)
     res = new RequestResource(name, jqxhrOptions, value)
     @storeResource(res, value)
     return res
 
   addSomethingResource: (name, value=1) ->
+    value = name if _.isNumber(name)
     @checkName(name)
     res = new SomethingResource(name, value)
     @storeResource(res, value)
     return res
+    
+  addPromiseResource: (promise, value=1) ->
+    somethingResource = @addSomethingResource('some promise', value)
+    promise.then(() -> somethingResource.markLoaded())
+    promise.catch(() -> somethingResource.markFailed())
 
   checkName: (name) ->
-    if not name
-      throw new Error('Resource name should not be empty.')
+    #if _.isString(name)
+    #  console.warn("SuperModel name property deprecated. Remove '#{name}' from code.")
 
   storeResource: (resource, value) ->
     @rid++
@@ -168,9 +240,12 @@ module.exports = class SuperModel extends Backbone.Model
     @num += r.value
     _.defer @updateProgress
     r.clean()
+    @stopListening r, 'failed', @onResourceFailed
+    @trigger 'resource-loaded', r
 
   onResourceFailed: (r) ->
     return unless @resources[r.rid]
+    @failed = true
     @trigger('failed', resource: r)
     r.clean()
 
@@ -195,8 +270,15 @@ module.exports = class SuperModel extends Backbone.Model
 
   getResource: (rid) ->
     return @resources[rid]
-
-
+    
+  # Promises
+  finishLoading: ->
+    new Promise (resolve, reject) =>
+      return resolve(@) if @finished()
+      @once 'failed', ({resource}) ->
+        jqxhr = resource.jqxhr
+        reject({message: jqxhr?.responseJSON?.message or jqxhr?.responseText or resource.error or 'Unknown Error'})
+      @once 'loaded-all', => resolve(@)
 
 class Resource extends Backbone.Model
   constructor: (name, value=1) ->
@@ -230,29 +312,57 @@ class Resource extends Backbone.Model
 
   load: -> @
 
-
-
 class ModelResource extends Resource
   constructor: (modelOrCollection, name, fetchOptions, value)->
     super(name, value)
     @model = modelOrCollection
     @fetchOptions = fetchOptions
     @jqxhr = @model.jqxhr
+    @loadsAttempted = 0
 
   load: ->
     @markLoading()
     @fetchModel()
     @
 
+#    # TODO: Track progress on requests and don't retry if progress was made recently.
+#    # Probably use _.debounce and attach event listeners to xhr objects.
+#
+#    # This logic is for handling failed responses for level loading.
+#    timeToWait = 5000
+#    tryLoad = =>
+#      return if this.isLoaded
+#      if @loadsAttempted > 4
+#        @markFailed()
+#        return @
+#      @markLoading()
+#      @model.loading = false # So fetchModel can run again
+#      if @loadsAttempted > 0
+#        console.log "Didn't load model in #{timeToWait}ms (attempt ##{@loadsAttempted}), trying again: ", _.result(@model, 'url')
+#      @fetchModel()
+#      @listenTo @model, 'error', (levelComponent, request) ->
+#        if request.status not in [408, 504, 522, 524]
+#          clearTimeout(@timeoutID)
+#      clearTimeout(@timeoutID) if @timeoutID
+#      @timeoutID = setTimeout(tryLoad, timeToWait)
+#      if application.testing
+#        application.timeoutsToClear?.push(@timeoutID)
+#      @loadsAttempted += 1
+#      timeToWait *= 1.5
+#    tryLoad()
+#    @
+
   fetchModel: ->
     @jqxhr = @model.fetch(@fetchOptions) unless @model.loading
+    @listen()
+
+  listen: ->
     @listenToOnce @model, 'sync', -> @markLoaded()
     @listenToOnce @model, 'error', -> @markFailed()
 
   clean: ->
     @jqxhr = null
     @model.jqxhr = null
-
 
 class RequestResource extends Resource
   constructor: (name, jqxhrOptions, value) ->
@@ -266,7 +376,5 @@ class RequestResource extends Resource
     @jqxhr.done => _.defer => @markLoaded()
     @jqxhr.fail => _.defer => @markFailed()
     @
-
-
 
 class SomethingResource extends Resource
